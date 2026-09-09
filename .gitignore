@@ -1,0 +1,31 @@
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# WordPress test files
+*.log
+wp-content/debug.log
+npm-debug.log
+
+# Build artifacts (if you ever add them)
+node_modules/
+vendor/
+*.cache
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+
+# Uploads directory (should never be committed)
+uploads/
+
+# Backup files
+*.orig
