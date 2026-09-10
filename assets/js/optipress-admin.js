@@ -873,6 +873,8 @@
 		safe(function () { Bulk.init(); });
 		safe(function () { Media.init(); window.Media = Media; });
 		safe(function () { Logs.init(); });
+		safe(function () { Analytics.init(); });
+		safe(function () { Settings.init(); });
 
 		// Delegated actions for tables rendered via AJAX.
 		document.addEventListener('click', function (e) {

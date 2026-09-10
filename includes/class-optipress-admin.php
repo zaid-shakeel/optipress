@@ -38,8 +38,11 @@ class OptiPress_Admin {
 		if ( ! $this->is_plugin_page( $hook ) ) {
 			return;
 		}
-		wp_enqueue_style( 'optipress-admin', OPTIPRESS_URL . 'assets/css/optipress-admin.css', array(), OPTIPRESS_VERSION );
-		wp_enqueue_script( 'optipress-admin', OPTIPRESS_URL . 'assets/js/optipress-admin.js', array(), OPTIPRESS_VERSION, true );
+		
+		$css_ver = file_exists( OPTIPRESS_PATH . 'assets/css/optipress-admin.css' ) ? (string) filemtime( OPTIPRESS_PATH . 'assets/css/optipress-admin.css' ) : OPTIPRESS_VERSION;
+		$js_ver  = file_exists( OPTIPRESS_PATH . 'assets/js/optipress-admin.js' ) ? (string) filemtime( OPTIPRESS_PATH . 'assets/js/optipress-admin.js' ) : OPTIPRESS_VERSION;
+		wp_enqueue_style( 'optipress-admin', OPTIPRESS_URL . 'assets/css/optipress-admin.css', array(), $css_ver );
+		wp_enqueue_script( 'optipress-admin', OPTIPRESS_URL . 'assets/js/optipress-admin.js', array(), $js_ver, true );
 
 		$caps = $this->p->env->capabilities();
 		wp_localize_script( 'optipress-admin', 'OptiPressData', array(

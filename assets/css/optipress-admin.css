@@ -13,7 +13,13 @@
 
 /* Header */
 .op-header{margin:8px 0 20px}
-.op-header__title{font-size:23px;font-weight:700;margin:0 0 2px;color:var(--op-text)}
+.op-header__title {
+    font-size: 23px;
+    font-weight: 700;
+    margin: 0 0 2px;
+    color: var(--op-text);
+    line-height: 1.3;
+}
 .op-header__sub{margin:0;color:var(--op-muted);font-size:13px}
 
 /* Layout */
@@ -267,3 +273,22 @@ input[type=search].op-input{min-width:220px}
 .op-chart svg{display:block}
 .op-chart g rect{transition:opacity .15s}
 .op-chart g:hover rect{opacity:.82}
+
+div#op-an-body {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px 0;
+    justify-content: space-between;
+}
+div#op-an-body .op-card__head {
+    width: 100%;
+}
+div#op-an-body .op-grid--2 {
+    width: 100%;
+}
+div#op-an-body .op-card__head {
+    margin: 0 0 0 0;
+}
+div#op-dash-chart .op-legend {
+    margin: -5px 0 0 0;
+}
