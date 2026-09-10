@@ -96,77 +96,113 @@
 	function closeModal() { if (overlay) { overlay.remove(); overlay = null; } }
 	document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeModal(); });
 
-	/* ---------------- Charts (SVG) ---------------- */
+	
+	/* ---------------- Charts (responsive SVG bars) ---------------- */
 
 	function ring(el) {
 		if (!el) return;
 		var pct = Math.max(0, Math.min(100, parseFloat(el.dataset.pct) || 0));
 		var circ = 2 * Math.PI * 52;
 		var fg = el.querySelector('.op-ring__fg');
-		if (fg) { requestAnimationFrame(function () { fg.style.strokeDashoffset = circ * (1 - pct / 100); }); }
+		if (fg) {
+			fg.style.strokeDasharray = circ;
+			requestAnimationFrame(function () {
+				fg.style.strokeDashoffset = circ * (1 - pct / 100);
+			});
+		}
 	}
 
-	function areaChart(el, series) {
-		if (!el) return;
-		var W = 900, H = 240, P = { t: 14, r: 14, b: 26, l: 54 };
-		var iw = W - P.l - P.r, ih = H - P.t - P.b;
-		var max = Math.max.apply(null, series.map(function (d) { return d.saved; }).concat([1024]));
-		var niceMax = Math.pow(2, Math.ceil(Math.log2(max)));
+	var opCharts = [];
+	window.addEventListener('resize', debounce(function () {
+		opCharts.forEach(function (el) { if (el._opRender) el._opRender(); });
+	}, 200));
 
-		function x(i) { return P.l + (series.length < 2 ? iw / 2 : (i / (series.length - 1)) * iw); }
+	function niceCeil(v) {
+		if (v <= 0) return 1;
+		var p = Math.pow(10, Math.floor(Math.log(v) / Math.LN10));
+		var f = v / p;
+		var nf = f <= 1 ? 1 : (f <= 2 ? 2 : (f <= 2.5 ? 2.5 : (f <= 5 ? 5 : 10)));
+		return nf * p;
+	}
+
+	/**
+	 * Bar chart that handles 1..365 days gracefully.
+	 * opts: {key, key2 (stacked), fmt, color, color2, label1, label2, legend, aria}
+	 */
+	function barChart(el, series, opts) {
+		if (!el) return;
+		opts = opts || {};
+		el._opRender = function () { drawBarChart(el, series, opts); };
+		if (opCharts.indexOf(el) === -1) opCharts.push(el);
+		drawBarChart(el, series, opts);
+	}
+
+	function drawBarChart(el, series, opts) {
+		var W = Math.max(560, el.clientWidth || 900);
+		var H = Math.max(180, el.clientHeight || 240);
+		var P = { t: 14, r: 10, b: 30, l: 62 };
+		var iw = W - P.l - P.r, ih = H - P.t - P.b;
+		var key = opts.key || 'saved';
+		var key2 = opts.key2 || null;
+		var fmt = opts.fmt || fmtBytes;
+
+		var max = 0;
+		series.forEach(function (d) {
+			var v = (Number(d[key]) || 0) + (key2 ? (Number(d[key2]) || 0) : 0);
+			if (v > max) max = v;
+		});
+		var niceMax = niceCeil(max || 1);
+
 		function y(v) { return P.t + ih - (v / niceMax) * ih; }
 
-		var path = '', area = '';
-		series.forEach(function (d, i) {
-			var px = x(i), py = y(d.saved);
-			path += (i === 0 ? 'M' : 'L') + px + ' ' + py + ' ';
-		});
-		if (series.length > 1) {
-			area = path + 'L' + x(series.length - 1) + ' ' + (P.t + ih) + ' L' + x(0) + ' ' + (P.t + ih) + ' Z';
+		var n = series.length;
+		var slot = iw / n;
+		var barW = Math.max(6, Math.min(slot * 0.62, 48));
+		var base = P.t + ih;
+
+		var grid = '', labels = '', bars = '';
+		for (var g = 0; g <= 4; g++) {
+			var gv = niceMax / 4 * g;
+			var gy = y(gv);
+			grid += '<line x1="' + P.l + '" y1="' + gy + '" x2="' + (W - P.r) + '" y2="' + gy + '"/>';
+			labels += '<text x="' + (P.l - 8) + '" y="' + (gy + 4) + '" text-anchor="end">' + esc(fmt(gv)) + '</text>';
 		}
 
-		var grid = '', labels = '';
-		for (var g = 0; g <= 4; g++) {
-			var gv = niceMax / 4 * g, gy = y(gv);
-			grid += '<line x1="' + P.l + '" y1="' + gy + '" x2="' + (W - P.r) + '" y2="' + gy + '"/>';
-			labels += '<text x="' + (P.l - 8) + '" y="' + (gy + 3) + '" text-anchor="end">' + fmtBytes(gv) + '</text>';
-		}
-		var step = Math.max(1, Math.floor(series.length / 8));
+		var labelStep = Math.max(1, Math.ceil(n / Math.max(4, Math.floor(iw / 70))));
 		series.forEach(function (d, i) {
-			if (i % step === 0 || i === series.length - 1) {
-				labels += '<text x="' + x(i) + '" y="' + (H - 6) + '" text-anchor="middle">' + esc(d.day.slice(5)) + '</text>';
+			var v1 = Number(d[key]) || 0;
+			var v2 = key2 ? (Number(d[key2]) || 0) : 0;
+			var h1 = (v1 / niceMax) * ih;
+			var h2 = (v2 / niceMax) * ih;
+			var x = P.l + slot * i + (slot - barW) / 2;
+			var y1 = base - h1;
+			var y2 = y1 - h2;
+			var title = esc(d.day) + ' · ' + esc(opts.label1 || key) + ': ' + esc(fmt(v1)) +
+				(key2 ? ' · ' + esc(opts.label2 || key2) + ': ' + esc(fmt(v2)) : '');
+
+			bars += '<g><title>' + title + '</title>';
+			if (h2 > 0.5) {
+				bars += '<rect x="' + x + '" y="' + y2 + '" width="' + barW + '" height="' + h2 + '" rx="3" fill="' + (opts.color2 || '#e8909f') + '"/>';
+			}
+			if (h1 > 0.5) {
+				bars += '<rect x="' + x + '" y="' + y1 + '" width="' + barW + '" height="' + h1 + '" rx="3" fill="' + (opts.color || 'url(#opBarGrad)') + '"/>';
+			}
+			if (h1 <= 0.5 && h2 <= 0.5) {
+				bars += '<rect x="' + x + '" y="' + (base - 2) + '" width="' + barW + '" height="2" rx="1" fill="#dfe5ef"/>';
+			}
+			bars += '</g>';
+
+			if (i % labelStep === 0 || i === n - 1) {
+				labels += '<text x="' + (x + barW / 2) + '" y="' + (H - 8) + '" text-anchor="middle">' + esc(d.day.slice(5)) + '</text>';
 			}
 		});
 
 		el.innerHTML =
-			'<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
-			'<defs><linearGradient id="opArea" x1="0" y1="0" x2="0" y2="1">' +
-			'<stop offset="0%" stop-color="#3056d3" stop-opacity=".22"/>' +
-			'<stop offset="100%" stop-color="#1fb6b0" stop-opacity=".02"/></linearGradient>' +
-			'<linearGradient id="opLine" x1="0" y1="0" x2="1" y2="0">' +
+			'<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(opts.aria || 'chart') + '">' +
+			'<defs><linearGradient id="opBarGrad" x1="0" y1="0" x2="0" y2="1">' +
 			'<stop offset="0%" stop-color="#3056d3"/><stop offset="100%" stop-color="#1fb6b0"/></linearGradient></defs>' +
-			'<g class="op-chart-grid">' + grid + '</g>' +
-			(area ? '<path d="' + area + '" fill="url(#opArea)"/>' : '') +
-			(series.length > 1 ? '<path d="' + path + '" fill="none" stroke="url(#opLine)" stroke-width="2.5" stroke-linejoin="round"/>' :
-				'<circle cx="' + x(0) + '" cy="' + y(series[0].saved) + '" r="5" fill="#3056d3"/>') +
-			labels + '</svg>' +
-			'<div class="op-legend"><span><i style="background:#3056d3"></i>' + esc('Bytes saved per day') + '</span></div>';
-	}
-
-	function barRow(el, series) {
-		if (!el) return;
-		var max = Math.max.apply(null, series.map(function (d) { return d.optimized + d.failed; }).concat([1]));
-		var html = '<div class="op-bars" style="display:flex;align-items:flex-end;gap:3px;height:120px;margin-top:18px">';
-		series.forEach(function (d) {
-			var okH = Math.round((d.optimized / max) * 110);
-			var badH = Math.round((d.failed / max) * 110);
-			html += '<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;gap:1px" title="' + esc(d.day) + '">' +
-				(badH ? '<div style="height:' + badH + 'px;background:#e8909f;border-radius:2px 2px 0 0"></div>' : '') +
-				(okH ? '<div style="height:' + okH + 'px;background:linear-gradient(180deg,#3056d3,#1fb6b0);border-radius:' + (badH ? '0' : '2px 2px 0 0') + '"></div>' : '') +
-				(!okH && !badH ? '<div style="height:2px;background:#e6e9f1"></div>' : '') + '</div>';
-		});
-		html += '</div><div class="op-legend"><span><i style="background:#3056d3"></i>Optimized</span><span><i style="background:#e8909f"></i>Failed</span></div>';
-		el.innerHTML = html;
+			'<g class="op-chart-grid">' + grid + '</g>' + bars + labels + '</svg>' +
+			(opts.legend || '');
 	}
 
 	/* ---------------- Pill helper ---------------- */
@@ -375,14 +411,14 @@
 
 	/* ---------------- Media table ---------------- */
 
+		/* ---------------- Media table ---------------- */
+
 	var Media = {
-		page: 1, filters: { q: '', status: 'all', webp: 'all', type: 'all' },
+		page: 1, filters: { q: '', status: 'all', webp: 'all', type: 'all' }, selected: {},
 
 		init: function () {
-			var wrap = document.getElementById('op-media-table');
-			if (!wrap) return;
+			if (!document.getElementById('op-media-table')) return;
 			var self = this;
-
 			document.getElementById('op-media-q').addEventListener('input', debounce(function (e) {
 				self.filters.q = e.target.value; self.page = 1; self.load();
 			}, 350));
@@ -397,6 +433,7 @@
 		load: function () {
 			var self = this;
 			var wrap = document.getElementById('op-media-table');
+			wrap.innerHTML = '<div class="op-skeleton"><div></div><div></div><div></div><div></div><div></div></div>';
 			var params = { page: this.page };
 			Object.keys(this.filters).forEach(function (k) { params[k] = self.filters[k]; });
 			api('media', params, 'GET').then(function (r) { self.render(r); }).catch(function (e) {
@@ -406,6 +443,9 @@
 
 		render: function (r) {
 			var wrap = document.getElementById('op-media-table');
+			this.selected = {};
+			this.syncBar();
+
 			if (!r.rows.length) {
 				wrap.innerHTML = '<div class="op-empty"><span class="dashicons dashicons-format-image"></span><h3>No images found</h3><p>' +
 					(this.page > 1 || this.filters.q ? 'Try different filters, or scan the library from the Bulk Optimize screen.' :
@@ -413,32 +453,79 @@
 				document.getElementById('op-media-pager').innerHTML = '';
 				return;
 			}
+
 			var html = '<table class="op-table"><thead><tr>' +
-				'<th>Image</th><th>Type</th><th>Dimensions</th><th>Original</th><th>Current</th><th>Saved</th>' +
-				'<th>Status</th><th>WebP</th><th>AVIF</th><th>Actions</th></tr></thead><tbody>';
+				'<th class="op-check"><input type="checkbox" id="op-media-selectall" aria-label="Select all"></th>' +
+				'<th>Image</th><th>Original</th><th>Current</th><th>Saved</th>' +
+				'<th>Status</th><th>WebP</th><th>AVIF</th><th>Date</th><th>Actions</th></tr></thead><tbody>';
 
 			r.rows.forEach(function (row) {
 				var short = row.mime.replace('image/', '').toUpperCase();
+				var savedCell = row.saved > 0
+					? '<b>−' + fmtBytes(row.saved) + '</b><div class="op-mini"><div class="op-mini__bar" style="width:' + Math.min(100, row.pct) + '%"></div></div><span class="op-sub">' + row.pct + '%</span>'
+					: '<span class="op-sub">—</span>';
 				html += '<tr data-item="' + row.id + '">' +
+					'<td class="op-check"><input type="checkbox" class="op-row-check" data-id="' + row.id + '" aria-label="Select ' + esc(row.file) + '"></td>' +
 					'<td><div style="display:flex;gap:10px;align-items:center">' +
-					(row.thumb ? '<img class="op-thumb" src="' + esc(row.thumb) + '" alt="">' : '<span class="op-thumb"></span>') +
+					(row.thumb ? '<img class="op-thumb" src="' + esc(row.thumb) + '" alt="" loading="lazy">' : '<span class="op-thumb"></span>') +
 					'<div><span class="op-file" title="' + esc(row.file) + '">' + esc(row.file) + '</span>' +
-					'<span class="op-sub">' + esc(row.optimized_at ? 'Optimized ' + row.optimized_at : 'Not optimized yet') + '</span></div></div></td>' +
-					'<td>' + esc(short) + '</td><td>' + esc(row.dimensions) + '</td>' +
+					'<span class="op-sub">' + esc(short) + ' · ' + esc(row.dimensions) + '</span></div></div></td>' +
 					'<td>' + fmtBytes(row.orig) + '</td><td>' + fmtBytes(row.current) + '</td>' +
-					'<td>' + (row.saved > 0 ? '<b>−' + fmtBytes(row.saved) + '</b> <span class="op-sub">(' + row.pct + '%)</span>' : '<span class="op-sub">—</span>') + '</td>' +
-					'<td>' + pill(row.status) + (row.error ? '<br><span class="op-sub" title="' + esc(row.error) + '">' + esc(row.error.slice(0, 60)) + (row.error.length > 60 ? '…' : '') + '</span>' : '') + '</td>' +
+					'<td>' + savedCell + '</td>' +
+					'<td>' + pill(row.status) + (row.error ? '<br><span class="op-sub" title="' + esc(row.error) + '">' + esc(row.error.slice(0, 40)) + (row.error.length > 40 ? '…' : '') + '</span>' : '') + '</td>' +
 					'<td>' + pill(row.webp) + '</td><td>' + pill(row.avif) + '</td>' +
+					'<td class="op-sub">' + esc(row.optimized_at || '—') + '</td>' +
 					'<td><div class="op-row-actions">' +
 					'<button class="op-btn op-btn--sm op-btn--ghost" data-detail="' + row.id + '">Details</button>' +
 					(row.status === 'pending' ? '<button class="op-btn op-btn--sm op-btn--primary" data-run="optimize" data-id="' + row.id + '">Optimize</button>' : '') +
-					(row.status === 'optimized' ? '<button class="op-btn op-btn--sm op-btn--ghost" data-run="reoptimize" data-id="' + row.id + '">Re-optimize</button>' : '') +
+					(row.status === 'optimized' ? '<button class="op-btn op-btn--sm op-btn--ghost" data-run="reoptimize" data-id="' + row.id + '">Re-opt</button>' : '') +
 					(row.status === 'failed' ? '<button class="op-btn op-btn--sm op-btn--primary" data-run="retry" data-id="' + row.id + '">' + esc(I.retry || 'Retry') + '</button>' : '') +
 					'</div></td></tr>';
 			});
 			html += '</tbody></table>';
 			wrap.innerHTML = html;
+			this.bindChecks();
 			this.pager(r);
+		},
+
+		bindChecks: function () {
+			var self = this;
+			var all = document.getElementById('op-media-selectall');
+			if (all) {
+				all.addEventListener('change', function () {
+					document.querySelectorAll('.op-row-check').forEach(function (c) {
+						c.checked = all.checked;
+						if (all.checked) { self.selected[c.dataset.id] = true; } else { delete self.selected[c.dataset.id]; }
+					});
+					self.syncBar();
+				});
+			}
+			document.querySelectorAll('.op-row-check').forEach(function (c) {
+				c.addEventListener('change', function () {
+					if (c.checked) { self.selected[c.dataset.id] = true; } else { delete self.selected[c.dataset.id]; }
+					self.syncBar();
+				});
+			});
+		},
+
+		syncBar: function () {
+			var bar = document.getElementById('op-media-bulkbar');
+			if (!bar) return;
+			var ids = Object.keys(this.selected);
+			var count = document.getElementById('op-media-selcount');
+			if (count) count.textContent = ids.length + ' selected';
+			bar.hidden = ids.length === 0;
+		},
+
+		bulkAction: function (op) {
+			var ids = Object.keys(this.selected);
+			if (!ids.length) return;
+			if (op === 'restore' && !window.confirm(I.confirm_restore)) return;
+			var self = this;
+			runAction(op, ids, null);
+			this.selected = {};
+			this.syncBar();
+			setTimeout(function () { self.load(); }, 1500);
 		},
 
 		pager: function (r) {
@@ -659,8 +746,10 @@
 				return;
 			}
 			body.innerHTML =
-				'<div class="op-card__head" style="margin-top:22px"><h2>Space Saved Over Time</h2></div><div class="op-chart" id="op-an-area"></div>' +
-				'<div class="op-card__head" style="margin-top:26px"><h2>Operations Per Day</h2></div><div id="op-an-bars"></div>' +
+				'<div class="op-card__head" style="margin-top:22px"><h2>Space Saved Per Day</h2><span class="op-muted">' + esc(fmtBytes(t.saved)) + ' total in range</span></div>' +
+				'<div class="op-chart" id="op-an-area"></div>' +
+				'<div class="op-card__head" style="margin-top:26px"><h2>Operations Per Day</h2><span class="op-muted">' + fmtNum(t.operations) + ' operations in range</span></div>' +
+				'<div class="op-chart op-chart--sm" id="op-an-bars"></div>' +
 				'<div class="op-grid op-grid--2" style="margin-top:26px">' +
 				'<div><h3 style="margin-top:0">Conversions</h3><ul class="op-kv">' +
 				'<li><span>WebP conversions</span><b>' + fmtNum(t.webp) + '</b></li>' +
@@ -669,8 +758,14 @@
 				'<li><span>Total operations</span><b>' + fmtNum(t.operations) + '</b></li>' +
 				'<li><span>Failed operations</span><b class="' + (t.failed ? 'op-danger' : '') + '">' + fmtNum(t.failed) + '</b></li>' +
 				'<li><span>Success rate</span><b>' + t.success_rate + '%</b></li></ul></div></div>';
-			areaChart(document.getElementById('op-an-area'), d.series);
-			barRow(document.getElementById('op-an-bars'), d.series);
+			barChart(document.getElementById('op-an-area'), d.series, {
+				key: 'saved', fmt: fmtBytes, label1: 'Saved', aria: 'Space saved per day',
+				legend: '<div class="op-legend"><span><i style="background:linear-gradient(180deg,#3056d3,#1fb6b0)"></i>Bytes saved</span></div>'
+			});
+			barChart(document.getElementById('op-an-bars'), d.series, {
+				key: 'optimized', key2: 'failed', fmt: fmtNum, label1: 'Optimized', label2: 'Failed', aria: 'Operations per day',
+				legend: '<div class="op-legend"><span><i style="background:#3056d3"></i>Optimized</span><span><i style="background:#e8909f"></i>Failed</span></div>'
+			});
 		}
 	};
 
@@ -745,7 +840,12 @@
 		ring(document.getElementById('op-dash-ring'));
 		var dataEl = document.getElementById('op-dash-chart-data');
 		if (dataEl) {
-			try { areaChart(document.getElementById('op-dash-chart'), JSON.parse(dataEl.textContent)); } catch (e) {}
+			try {
+				barChart(document.getElementById('op-dash-chart'), JSON.parse(dataEl.textContent), {
+					key: 'saved', fmt: fmtBytes, label1: 'Saved', aria: 'Bytes saved per day',
+					legend: '<div class="op-legend"><span><i style="background:linear-gradient(180deg,#3056d3,#1fb6b0)"></i>Bytes saved per day</span></div>'
+				});
+			} catch (e) {}
 		}
 		// Periodic refresh so stats stay live during background auto-optimization.
 		if (document.getElementById('op-dash-cards')) {
@@ -766,13 +866,13 @@
 
 	document.addEventListener('DOMContentLoaded', function () {
 		var body = document.body;
-		initDashboard();
-		Bulk.init();
-		Media.init();
-		window.Media = Media;
-		Logs.init();
-		Analytics.init();
-		Settings.init();
+		var safe = function (fn) {
+			try { fn(); } catch (e) { if (window.console) console.error('OptiPress UI error:', e); }
+		};
+		safe(initDashboard);
+		safe(function () { Bulk.init(); });
+		safe(function () { Media.init(); window.Media = Media; });
+		safe(function () { Logs.init(); });
 
 		// Delegated actions for tables rendered via AJAX.
 		document.addEventListener('click', function (e) {
@@ -784,7 +884,21 @@
 				return;
 			}
 			var detail = e.target.closest('[data-detail]');
-			if (detail) { openDetail(detail.dataset.detail); }
+			if (detail) { openDetail(detail.dataset.detail); return; }
+
+			var mb = e.target.closest('[data-media-bulk]');
+			if (mb && window.Media) {
+				var mop = mb.dataset.mediaBulk;
+				if (mop === 'clear') {
+					Media.selected = {};
+					document.querySelectorAll('.op-row-check').forEach(function (c) { c.checked = false; });
+					var sa = document.getElementById('op-media-selectall');
+					if (sa) sa.checked = false;
+					Media.syncBar();
+				} else {
+					Media.bulkAction(mop);
+				}
+			}
 		});
 
 		// Dismiss the global pending notice.

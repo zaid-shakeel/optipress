@@ -238,3 +238,32 @@ input[type=search].op-input{min-width:220px}
 
 .op-progress__bar.is-done{background:#148a5c}
 .op-progress__bar.is-done:after{display:none;animation:none}
+
+
+/* Queue overview (Bulk page) */
+.op-queue{display:grid;margin:6px 0 18px;border:1px solid var(--op-border-soft);border-radius:10px;overflow:hidden}
+.op-queue__row{display:flex;justify-content:space-between;padding:10px 14px;font-size:13px;background:#fbfcfe}
+.op-queue__row:nth-child(even){background:#f6f8fc}
+.op-queue__row b{font-variant-numeric:tabular-nums}
+.op-empty--sm{padding:26px 16px}
+.op-empty--sm .dashicons{font-size:30px;width:30px;height:30px;color:#9fd3b8}
+.op-empty--sm h3{font-size:14px}
+.op-empty--sm p{font-size:12.5px;margin-bottom:0}
+
+/* Media selection bulk bar */
+.op-bulkbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--op-primary-soft);border:1px solid #d5defc;border-radius:10px;padding:10px 14px;margin-bottom:12px}
+.op-bulkbar span#op-media-selcount{font-weight:650;font-size:13px;color:var(--op-primary);margin-right:6px}
+
+/* Mini savings bar in media rows */
+.op-mini{width:64px;height:4px;background:var(--op-border-soft);border-radius:99px;margin:4px 0 2px;overflow:hidden}
+.op-mini__bar{height:100%;background:linear-gradient(90deg,var(--op-ring-from),var(--op-ring-to));border-radius:99px}
+
+/* Row checkboxes */
+.op-check{width:34px;text-align:center}
+.op-check input{accent-color:var(--op-primary);width:15px;height:15px;cursor:pointer}
+
+/* Chart containers */
+.op-chart--sm{height:200px}
+.op-chart svg{display:block}
+.op-chart g rect{transition:opacity .15s}
+.op-chart g:hover rect{opacity:.82}
