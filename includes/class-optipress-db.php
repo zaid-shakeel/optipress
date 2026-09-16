@@ -1,14 +1,10 @@
 <?php
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-/**
- * Schema + repositories. Single source of truth for items, logs, daily aggregates.
- */
 class OptiPress_DB {
-
-	/** @var string */ public $items;
-	/** @var string */ public $logs;
-	/** @var string */ public $daily;
+	public $items;
+	public $logs;
+	public $daily;
 
 	public function __construct() {
 		global $wpdb;
@@ -20,7 +16,6 @@ class OptiPress_DB {
 	public function create_tables() {
 		global $wpdb;
 		$charset = $wpdb->get_charset_collate();
-
 		$sql_items = "CREATE TABLE {$this->items} (
 			id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
 			attachment_id BIGINT(20) UNSIGNED NOT NULL,
@@ -48,7 +43,6 @@ class OptiPress_DB {
 			KEY webp_status (webp_status),
 			KEY avif_status (avif_status)
 		) $charset;";
-
 		$sql_logs = "CREATE TABLE {$this->logs} (
 			id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
 			created_at DATETIME NOT NULL,
@@ -64,7 +58,6 @@ class OptiPress_DB {
 			KEY op (op),
 			KEY attachment_id (attachment_id)
 		) $charset;";
-
 		$sql_daily = "CREATE TABLE {$this->daily} (
 			day DATE NOT NULL,
 			optimized INT(11) UNSIGNED NOT NULL DEFAULT 0,
@@ -74,58 +67,45 @@ class OptiPress_DB {
 			avif INT(11) UNSIGNED NOT NULL DEFAULT 0,
 			PRIMARY KEY  (day)
 		) $charset;";
-
 		dbDelta( $sql_items );
 		dbDelta( $sql_logs );
 		dbDelta( $sql_daily );
 	}
 
 	/* ---------------- Items ---------------- */
-
-	/** @param array $data @return int */
 	public function insert_item( $data ) {
 		global $wpdb;
 		$data['updated_at'] = current_time( 'mysql' );
+		OptiPress_Debug::log( 'db.insert_item', 'Inserting item row', array( 'attachment_id' => $data['attachment_id'] ?? 0, 'mime' => $data['mime'] ?? '' ) );
 		$wpdb->insert( $this->items, $data );
 		return (int) $wpdb->insert_id;
 	}
 
-	/** @param int $id @param array $data */
 	public function update_item( $id, $data ) {
 		global $wpdb;
 		$data['updated_at'] = current_time( 'mysql' );
 		$wpdb->update( $this->items, $data, array( 'id' => (int) $id ) );
 	}
 
-	/** @param int $id @return object|null */
 	public function get_item( $id ) {
 		global $wpdb;
 		return $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$this->items} WHERE id = %d", (int) $id ) );
 	}
 
-	/** @param int $attachment_id @return object|null */
 	public function get_item_by_attachment( $attachment_id ) {
 		global $wpdb;
 		return $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$this->items} WHERE attachment_id = %d", (int) $attachment_id ) );
 	}
 
-	/** @param int $id */
 	public function delete_item( $id ) {
 		global $wpdb;
 		$wpdb->delete( $this->items, array( 'id' => (int) $id ) );
 	}
 
-	/**
-	 * Paginated + filtered item list.
-	 *
-	 * @param array $args {q,status,webp,avif,type,page,per_page}
-	 * @return array {rows,total}
-	 */
 	public function page_items( $args ) {
 		global $wpdb;
 		$where  = array( '1=1' );
 		$params = array();
-
 		if ( ! empty( $args['q'] ) ) {
 			$where[]  = 'file LIKE %s';
 			$params[] = '%' . $wpdb->esc_like( $args['q'] ) . '%';
@@ -146,28 +126,18 @@ class OptiPress_DB {
 			$where[]  = 'mime LIKE %s';
 			$params[] = $args['type'] . '/%';
 		}
-
-		$per_page = min( 100, max( 1, (int) ( isset( $args['per_page'] ) ? $args['per_page'] : 25 ) ) );
+		$per_page = min( 100, max( 10, (int) ( isset( $args['per_page'] ) ? $args['per_page'] : 25 ) ) );
 		$page     = max( 1, (int) ( isset( $args['page'] ) ? $args['page'] : 1 ) );
 		$offset   = ( $page - 1 ) * $per_page;
-
+		OptiPress_Debug::log( 'db.page_items', 'Querying items', array( 'page' => $page, 'per_page' => $per_page, 'filters' => $args ) );
 		$sql = 'SELECT SQL_CALC_FOUND_ROWS * FROM ' . $this->items . ' WHERE ' . implode( ' AND ', $where ) . ' ORDER BY attachment_id DESC LIMIT %d OFFSET %d';
 		$params[] = $per_page;
 		$params[] = $offset;
-
 		$rows  = $wpdb->get_results( $wpdb->prepare( $sql, $params ) );
 		$total = (int) $wpdb->get_var( 'SELECT FOUND_ROWS()' );
-
 		return array( 'rows' => $rows ? $rows : array(), 'total' => $total, 'pages' => (int) ceil( $total / $per_page ) );
 	}
 
-	/**
-	 * Candidates for bulk operations.
-	 *
-	 * @param string $mode optimize|retry_failed|webp|avif
-	 * @param int    $limit
-	 * @return array
-	 */
 	public function bulk_candidates( $mode, $limit ) {
 		global $wpdb;
 		$limit = max( 1, min( 50, (int) $limit ) );
@@ -188,7 +158,6 @@ class OptiPress_DB {
 		return $rows ? $rows : array();
 	}
 
-	/** @param string $mode @return int */
 	public function count_candidates( $mode ) {
 		global $wpdb;
 		switch ( $mode ) {
@@ -203,16 +172,14 @@ class OptiPress_DB {
 		}
 	}
 
-	/** Reset stale 'processing' rows (crashed requests). */
 	public function recover_stale_processing() {
 		global $wpdb;
-		$wpdb->query( "UPDATE {$this->items} SET status = 'pending' WHERE status = 'processing' AND updated_at < (NOW() - INTERVAL 10 MINUTE)" );
+		$n = $wpdb->query( "UPDATE {$this->items} SET status = 'pending' WHERE status = 'processing' AND updated_at < (NOW() - INTERVAL 10 MINUTE)" );
+		if ( $n > 0 ) {
+			OptiPress_Debug::log( 'db.recover_stale', "Recovered $n stale processing rows" );
+		}
 	}
 
-	/**
-	 * Aggregate counters — one query, cached by Stats layer.
-	 * @return array
-	 */
 	public function counters() {
 		global $wpdb;
 		$r = $wpdb->get_row(
@@ -249,14 +216,6 @@ class OptiPress_DB {
 	}
 
 	/* ---------------- Logs ---------------- */
-
-	/**
-	 * @param string $level success|info|warning|error
-	 * @param string $op
-	 * @param string $message
-	 * @param array  $extra {attachment_id,file,context}
-	 * @return int
-	 */
 	public function insert_log( $level, $op, $message, $extra = array() ) {
 		global $wpdb;
 		$wpdb->insert( $this->logs, array(
@@ -271,7 +230,6 @@ class OptiPress_DB {
 		return (int) $wpdb->insert_id;
 	}
 
-	/** Early-activation logger (before services exist). */
 	public static function static_log( $level, $op, $message ) {
 		global $wpdb;
 		$table = $wpdb->prefix . 'optipress_logs';
@@ -286,41 +244,31 @@ class OptiPress_DB {
 		) );
 	}
 
-	/**
-	 * @param array $args {level,op,q,from,to,page,per_page}
-	 * @return array
-	 */
 	public function page_logs( $args ) {
 		global $wpdb;
 		$where  = array( '1=1' );
 		$params = array();
-
 		if ( ! empty( $args['level'] ) && 'all' !== $args['level'] ) { $where[] = 'level = %s'; $params[] = $args['level']; }
 		if ( ! empty( $args['op'] ) && 'all' !== $args['op'] )       { $where[] = 'op = %s';    $params[] = $args['op']; }
 		if ( ! empty( $args['q'] ) ) { $where[] = '(file LIKE %s OR message LIKE %s)'; $like = '%' . $wpdb->esc_like( $args['q'] ) . '%'; $params[] = $like; $params[] = $like; }
 		if ( ! empty( $args['from'] ) ) { $where[] = 'created_at >= %s'; $params[] = $args['from'] . ' 00:00:00'; }
 		if ( ! empty( $args['to'] ) )   { $where[] = 'created_at <= %s'; $params[] = $args['to'] . ' 23:59:59'; }
-
 		$per_page = min( 100, max( 1, (int) ( isset( $args['per_page'] ) ? $args['per_page'] : 30 ) ) );
 		$page     = max( 1, (int) ( isset( $args['page'] ) ? $args['page'] : 1 ) );
 		$params[] = $per_page;
 		$params[] = ( $page - 1 ) * $per_page;
-
 		$sql   = 'SELECT SQL_CALC_FOUND_ROWS * FROM ' . $this->logs . ' WHERE ' . implode( ' AND ', $where ) . ' ORDER BY id DESC LIMIT %d OFFSET %d';
 		$rows  = $wpdb->get_results( $wpdb->prepare( $sql, $params ) );
 		$total = (int) $wpdb->get_var( 'SELECT FOUND_ROWS()' );
-
 		return array( 'rows' => $rows ? $rows : array(), 'total' => $total, 'pages' => (int) ceil( $total / $per_page ) );
 	}
 
-	/** @param int $attachment_id @param int $limit */
 	public function logs_for_attachment( $attachment_id, $limit = 15 ) {
 		global $wpdb;
 		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$this->logs} WHERE attachment_id = %d ORDER BY id DESC LIMIT %d", (int) $attachment_id, (int) $limit ) );
 		return $rows ? $rows : array();
 	}
 
-	/** @param int $days */
 	public function prune_logs( $days ) {
 		global $wpdb;
 		if ( $days > 0 ) {
@@ -334,11 +282,6 @@ class OptiPress_DB {
 	}
 
 	/* ---------------- Daily aggregates ---------------- */
-
-	/**
-	 * @param string $field optimized|failed|saved|webp|avif
-	 * @param int    $amount
-	 */
 	public function bump_daily( $field, $amount ) {
 		global $wpdb;
 		$allowed = array( 'optimized', 'failed', 'saved', 'webp', 'avif' );
@@ -346,24 +289,36 @@ class OptiPress_DB {
 			return;
 		}
 		$day = current_time( 'Y-m-d' );
+		OptiPress_Debug::log( 'db.bump_daily', "Bumping $field by $amount on $day" );
 		$wpdb->query( $wpdb->prepare(
 			"INSERT INTO {$this->daily} (day, {$field}) VALUES (%s, %d)
-			 ON DUPLICATE KEY UPDATE {$field} = {$field} + VALUES({$field})",
+			ON DUPLICATE KEY UPDATE {$field} = {$field} + VALUES({$field})",
 			$day, (int) $amount
 		) );
 	}
 
 	/**
-	 * @param string $range today|7|30|90|365|all
-	 * @return array
+	 * Decrement a daily aggregate (never below zero). Used by restore to roll back analytics.
 	 */
+	public function decrement_daily( $day, $field, $amount ) {
+		global $wpdb;
+		$allowed = array( 'optimized', 'failed', 'saved', 'webp', 'avif' );
+		if ( ! in_array( $field, $allowed, true ) || ! $day || $amount <= 0 ) {
+			return;
+		}
+		OptiPress_Debug::log( 'db.decrement_daily', "Decrementing $field by $amount on $day" );
+		$wpdb->query( $wpdb->prepare(
+			"UPDATE {$this->daily} SET {$field} = GREATEST(0, {$field} - %d) WHERE day = %s",
+			(int) $amount, $day
+		) );
+	}
+
 	public function daily_series( $range ) {
 		global $wpdb;
 		$all = ( 'all' === $range );
 		$days = (int) $range;
 		if ( 'today' === $range ) { $days = 1; }
 		if ( ! $all && $days < 1 ) { $days = 30; }
-
 		if ( $all ) {
 			$rows = $wpdb->get_results( "SELECT * FROM {$this->daily} ORDER BY day ASC" );
 		} else {

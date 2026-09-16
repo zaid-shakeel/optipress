@@ -70,6 +70,11 @@ $optipress_core_files = array(
 	'includes/class-optipress-admin.php',
 );
 
+// Load debug helper first.
+if ( file_exists( OPTIPRESS_PATH . 'includes/class-optipress-debug.php' ) ) {
+	require_once OPTIPRESS_PATH . 'includes/class-optipress-debug.php';
+}
+
 foreach ( $optipress_core_files as $optipress_file ) {
 	if ( ! file_exists( OPTIPRESS_PATH . $optipress_file ) ) {
 		$GLOBALS['optipress_missing_files'][] = $optipress_file;
@@ -126,6 +131,12 @@ function optipress_boot() {
 	}
 	try {
 		optipress();
+		$GLOBALS['optipress_plugin_ready'] = true;
+		OptiPress_Debug::log( 'boot', 'Plugin booted successfully', array(
+			'php'    => PHP_VERSION,
+			'wp'     => get_bloginfo( 'version' ),
+			'version' => OPTIPRESS_VERSION,
+		) );
 	} catch ( \Throwable $optipress_error ) {
 		$GLOBALS['optipress_boot_error'] = $optipress_error;
 		add_action( 'admin_notices', 'optipress_boot_error_notice' );

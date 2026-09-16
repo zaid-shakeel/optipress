@@ -129,6 +129,7 @@ class OptiPress_Admin {
 			'processing' => __( 'Processing', 'optipress' ),
 			'done'       => __( 'Done', 'optipress' ),
 			'none'       => '—',
+			'na'         => __( 'N/A', 'optipress' ),
 		);
 		$label = isset( $map[ $status ] ) ? $map[ $status ] : $status;
 		return '<span class="op-pill op-pill--' . esc_attr( $status ) . '">' . esc_html( $label ) . '</span>';
@@ -297,10 +298,10 @@ class OptiPress_Admin {
 
 		// Summary cards.
 		echo '<div class="op-cards op-cards--4">';
-		echo $this->stat_card( __( 'Total Images', 'optipress' ), number_format_i18n( $c['total'] ), esc_html__( 'in your Media Library', 'optipress' ) );
-		echo $this->stat_card( __( 'Optimized', 'optipress' ), number_format_i18n( $c['optimized'] ), esc_html( sprintf( __( '%s%% of library processed', 'optipress' ), number_format_i18n( $c['library_pct'], 1 ) ) ) );
-		echo $this->stat_card( __( 'Needs Attention', 'optipress' ), number_format_i18n( $c['pending'] + $c['failed'] ), esc_html( sprintf( __( '%1$s pending · %2$s failed', 'optipress' ), number_format_i18n( $c['pending'] ), number_format_i18n( $c['failed'] ) ) ) );
-		echo $this->stat_card( __( 'Space Saved', 'optipress' ), size_format( $c['saved'] ), esc_html( sprintf( __( 'avg %s%% per image', 'optipress' ), number_format_i18n( $c['avg_pct'], 1 ) ) ), true );
+		echo $this->stat_card( __( 'Total Images', 'optipress' ), number_format_i18n( $c['total'] ), esc_html__( 'in your Media Library', 'optipress' ), false, 'data-bstat="total"' );
+		echo $this->stat_card( __( 'Optimized', 'optipress' ), number_format_i18n( $c['optimized'] ), esc_html( sprintf( __( '%s%% of library processed', 'optipress' ), number_format_i18n( $c['library_pct'], 1 ) ) ), false, 'data-bstat="optimized"' );
+		echo $this->stat_card( __( 'Needs Attention', 'optipress' ), number_format_i18n( $c['pending'] + $c['failed'] ), esc_html( sprintf( __( '%1$s pending · %2$s failed', 'optipress' ), number_format_i18n( $c['pending'] ), number_format_i18n( $c['failed'] ) ) ), false, 'data-bstat="attention"' );
+		echo $this->stat_card( __( 'Space Saved', 'optipress' ), size_format( $c['saved'] ), esc_html( sprintf( __( 'avg %s%% per image', 'optipress' ), number_format_i18n( $c['avg_pct'], 1 ) ) ), true, 'data-bstat="saved"' );
 		echo '</div>';
 
 		$q_opt  = $this->p->db->count_candidates( 'optimize' );
@@ -313,32 +314,31 @@ class OptiPress_Admin {
 		// Runner card.
 		echo '<div class="op-card op-bulk" id="op-bulk" data-view="bulk">';
 		echo '<div class="op-card__head"><h2>' . esc_html__( 'Bulk Optimization', 'optipress' ) . '</h2>';
-		echo '<span class="op-muted">' . esc_html( sprintf( __( '%s images total', 'optipress' ), number_format_i18n( $c['total'] ) ) ) . '</span></div>';
+		echo '<span class="op-muted" id="op-bulk-headnote">' . esc_html( sprintf( __( '%s images total', 'optipress' ), number_format_i18n( $c['total'] ) ) ) . '</span></div>';
 
-		if ( 0 === $q_opt && 0 === $q_ret ) {
-			echo '<div class="op-empty op-empty--sm"><span class="dashicons dashicons-yes-alt"></span>';
+		$caught_hidden = ( ( $q_opt + $q_ret ) > 0 ) ? ' hidden' : '';
+		if ( true ) {
+			echo '<div class="op-empty op-empty--sm" id="op-bulk-caughtup"' . $caught_hidden . '><span class="dashicons dashicons-yes-alt"></span>';
 			echo '<h3>' . esc_html__( 'All caught up!', 'optipress' ) . '</h3>';
 			echo '<p>' . esc_html__( 'Every eligible image has been optimized. New uploads are processed automatically — or start a conversion run below.', 'optipress' ) . '</p></div>';
 		}
 
 		echo '<div class="op-queue">';
-		echo '<div class="op-queue__row"><span>' . esc_html__( 'Optimization queue', 'optipress' ) . '</span><b>' . number_format_i18n( $q_opt ) . '</b></div>';
-		echo '<div class="op-queue__row"><span>' . esc_html__( 'Failed retries', 'optipress' ) . '</span><b class="' . ( $q_ret ? 'op-danger' : '' ) . '">' . number_format_i18n( $q_ret ) . '</b></div>';
-		echo '<div class="op-queue__row"><span>' . esc_html__( 'WebP conversions pending', 'optipress' ) . '</span><b>' . number_format_i18n( $q_webp ) . '</b></div>';
-		echo '<div class="op-queue__row"><span>' . esc_html__( 'AVIF conversions pending', 'optipress' ) . '</span><b>' . number_format_i18n( $q_avif ) . '</b></div>';
+		echo '<div class="op-queue__row"><span>' . esc_html__( 'Optimization queue', 'optipress' ) . '</span><b id="op-q-optimize">' . number_format_i18n( $q_opt ) . '</b></div>';
+		echo '<div class="op-queue__row"><span>' . esc_html__( 'Failed retries', 'optipress' ) . '</span><b id="op-q-retry" class="' . ( $q_ret ? 'op-danger' : '' ) . '">' . number_format_i18n( $q_ret ) . '</b></div>';
+		echo '<div class="op-queue__row"><span>' . esc_html__( 'WebP conversions pending', 'optipress' ) . '</span><b id="op-q-webp">' . number_format_i18n( $q_webp ) . '</b></div>';
+		echo '<div class="op-queue__row"><span>' . esc_html__( 'AVIF conversions pending', 'optipress' ) . '</span><b id="op-q-avif">' . number_format_i18n( $q_avif ) . '</b></div>';
 		echo '</div>';
 
 		echo '<div class="op-bulk__actions">';
 		echo '<button class="op-btn op-btn--ghost" data-bulk-scan>' . esc_html__( 'Scan Library', 'optipress' ) . '</button>';
-		if ( $q_ret > 0 ) {
-			echo '<button class="op-btn op-btn--ghost" data-bulk-mode="retry_failed">' . esc_html( sprintf( __( 'Retry Failed (%s)', 'optipress' ), number_format_i18n( $q_ret ) ) ) . '</button>';
+		echo '<button class="op-btn op-btn--ghost" data-bulk-mode="retry_failed"' . ( $q_ret < 1 ? ' disabled' : '' ) . '>' . esc_html__( 'Retry Failed', 'optipress' ) . '</button>';
+		if ( $caps['webp_encode'] ) {
+			echo '<button class="op-btn op-btn--ghost" data-bulk-mode="webp"' . ( $q_webp < 1 ? ' disabled' : '' ) . '>' . esc_html__( 'Convert to WebP', 'optipress' ) . '</button>';
 		}
-		if ( $caps['webp_encode'] && $q_webp > 0 ) {
-			echo '<button class="op-btn op-btn--ghost" data-bulk-mode="webp">' . esc_html__( 'Convert All to WebP', 'optipress' ) . '</button>';
-		}
-		if ( $caps['avif_encode'] && $q_avif > 0 ) {
-			echo '<button class="op-btn op-btn--ghost" data-bulk-mode="avif">' . esc_html__( 'Convert All to AVIF', 'optipress' ) . '</button>';
-		} elseif ( ! $caps['avif_encode'] ) {
+		if ( $caps['avif_encode'] ) {
+			echo '<button class="op-btn op-btn--ghost" data-bulk-mode="avif"' . ( $q_avif < 1 ? ' disabled' : '' ) . '>' . esc_html__( 'Convert to AVIF', 'optipress' ) . '</button>';
+		} else {
 			echo '<p class="op-muted op-bulk__avif-note">' . esc_html( $caps['avif_reason'] ) . '</p>';
 		}
 		$start_disabled = ( $q_opt < 1 ) ? ' disabled' : '';
@@ -419,6 +419,12 @@ class OptiPress_Admin {
 		echo '<option value="image/png">PNG</option>';
 		echo '<option value="image/gif">GIF</option>';
 		echo '<option value="image/webp">WebP</option>';
+		echo '</select>';
+
+		echo '<select id="op-media-perpage" class="op-input" aria-label="' . esc_attr__( 'Items per page', 'optipress' ) . '">';
+		echo '<option value="25">25 / page</option>';
+		echo '<option value="50">50 / page</option>';
+		echo '<option value="100">100 / page</option>';
 		echo '</select>';
 
 		echo '</div>';

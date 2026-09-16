@@ -1,37 +1,22 @@
 <?php
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-/**
- * Bulk runner. AJAX-driven batches with a server-side lock token so a run can
- * never be double-started, and crashed runs recover automatically.
- */
 class OptiPress_Queue {
-
 	const LOCK_OPTION = 'optipress_bulk_lock';
-
-	/** @var OptiPress_Plugin */ private $p;
+	private $p;
 
 	public function __construct( $plugin ) {
 		$this->p = $plugin;
 	}
 
-	/**
-	 * Start a run. Refuses if a fresh run is already active under another token.
-	 *
-	 * @param string $mode optimize|retry_failed|webp|avif
-	 * @return array
-	 */
 	public function start( $mode ) {
 		$this->recover_stale_items();
-
 		$lock = $this->lock();
 		if ( $lock && 'running' === $lock['state'] && ( time() - $lock['updated'] ) < 120 ) {
 			return array( 'ok' => false, 'busy' => true, 'token' => $lock['token'], 'message' => __( 'A bulk operation is already running.', 'optipress' ) );
 		}
 
-		// Convert existing-library images: make sure the library is synced first.
 		$total = $this->p->db->count_candidates( $mode );
-
 		$token = wp_generate_password( 16, false );
 		$this->set_lock( array(
 			'state'     => 'running',
@@ -45,51 +30,48 @@ class OptiPress_Queue {
 			'last_file' => '',
 		) );
 
+		// Breakdown for webp/avif modes (already-converted / N/A / unsupported).
+		$breakdown = array();
+		if ( 'webp' === $mode || 'avif' === $mode ) {
+			global $wpdb;
+			$col = $mode . '_status'; // safe: mode is whitelisted above
+			$breakdown = array(
+				'already'     => (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$this->p->db->items} WHERE {$col} = 'done'" ),
+				'na'          => (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$this->p->db->items} WHERE {$col} = 'na'" ),
+				'unsupported' => (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$this->p->db->items} WHERE status = 'skipped'" ),
+			);
+			OptiPress_Debug::log( 'queue.start_breakdown', "Mode $mode: queued=$total " . wp_json_encode( $breakdown ) );
+		}
+
 		$this->p->logger->info( 'bulk', sprintf(
-			/* translators: 1: mode, 2: count */
 			__( 'Bulk %1$s started with %2$d images queued.', 'optipress' ),
 			$this->mode_label( $mode ), $total
-		), array( 'context' => array( 'mode' => $mode, 'total' => $total ) ) );
+		), array( 'context' => array( 'mode' => $mode, 'total' => $total, 'breakdown' => $breakdown ) ) );
 
-		return array( 'ok' => true, 'token' => $token, 'total' => $total );
+		return array( 'ok' => true, 'token' => $token, 'total' => $total, 'breakdown' => $breakdown );
 	}
 
-	/**
-	 * Process one batch. Validates token. Respects time budget.
-	 *
-	 * @param string $token
-	 * @return array
-	 */
 	public function run_batch( $token ) {
 		$lock = $this->lock();
 		if ( ! $lock || 'running' !== $lock['state'] || $lock['token'] !== $token ) {
 			return array( 'ok' => false, 'finished' => true, 'message' => __( 'No active bulk operation.', 'optipress' ) );
 		}
-
 		@set_time_limit( max( 30, (int) $this->p->settings->get( 'time_limit' ) + 15 ) );
-
 		$mode      = $lock['mode'];
 		$budget    = max( 5, (int) $this->p->settings->get( 'time_limit' ) );
 		$batch_max = max( 1, (int) $this->p->settings->get( 'batch_size' ) );
 		$start     = microtime( true );
-
 		$results   = array();
 		$processed = 0;
 
 		while ( $processed < $batch_max ) {
 			$candidates = $this->p->db->bulk_candidates( $mode, 1 );
-			if ( empty( $candidates ) ) {
-				break;
-			}
+			if ( empty( $candidates ) ) { break; }
 			$item = $candidates[0];
-
-			// Claim the item.
 			$this->p->db->update_item( (int) $item->id, array( 'status' => 'processing' ) );
-
 			$r = $this->process_one( $item, $mode );
 			$results[] = $r;
 			$processed++;
-
 			$lock['processed'] = (int) $lock['processed'] + 1;
 			if ( ! empty( $r['failed'] ) ) {
 				$lock['failed'] = (int) $lock['failed'] + 1;
@@ -97,18 +79,12 @@ class OptiPress_Queue {
 			$lock['last_file'] = isset( $r['file'] ) ? $r['file'] : '';
 			$lock['updated']   = time();
 			$this->set_lock( $lock );
-
-			if ( ( microtime( true ) - $start ) > ( $budget - 2 ) ) {
-				break; // Leave headroom for the response.
-			}
+			if ( ( microtime( true ) - $start ) > ( $budget - 2 ) ) { break; }
 		}
 
 		$remaining = $this->p->db->count_candidates( $mode );
 		$finished  = 0 === $remaining;
-
-		if ( $finished ) {
-			$this->finish( $lock );
-		}
+		if ( $finished ) { $this->finish( $lock ); }
 
 		return array(
 			'ok'        => true,
@@ -124,29 +100,20 @@ class OptiPress_Queue {
 		);
 	}
 
-	/** Route a single item by mode. @return array */
 	private function process_one( $item, $mode ) {
 		switch ( $mode ) {
 			case 'webp':
-				$r = $this->p->converter->generate( (int) $item->id, 'webp' );
-				return array(
-					'file'    => wp_basename( $item->file ),
-					'ok'      => ! empty( $r['ok'] ),
-					'failed'  => empty( $r['ok'] ),
-					'message' => $r['message'],
-					'saved'   => 0,
-				);
 			case 'avif':
-				$r = $this->p->converter->generate( (int) $item->id, 'avif' );
+				$r = $this->p->converter->generate( (int) $item->id, $mode );
 				return array(
 					'file'    => wp_basename( $item->file ),
 					'ok'      => ! empty( $r['ok'] ),
-					'failed'  => empty( $r['ok'] ),
+					'failed'  => ( empty( $r['ok'] ) && empty( $r['skipped'] ) ),
+					'skipped' => ! empty( $r['skipped'] ),
 					'message' => $r['message'],
 					'saved'   => 0,
 				);
 			default:
-				// Reset failed items before retry so the processor re-claims them.
 				if ( 'retry_failed' === $mode || 'failed' === $item->status ) {
 					$this->p->db->update_item( (int) $item->id, array( 'status' => 'pending', 'error_code' => '', 'error_message' => null ) );
 				}
@@ -167,22 +134,17 @@ class OptiPress_Queue {
 		$failed  = (int) $lock['failed'];
 		$attempts = (int) $lock['attempts'];
 
-		// Optional single automatic retry pass for failures (e.g. transient memory issues).
 		if ( $failed > 0 && 'optimize' === $mode && $attempts < 1 && $this->p->settings->get( 'auto_retry' ) ) {
 			$lock['mode']     = 'retry_failed';
 			$lock['attempts'] = $attempts + 1;
 			$lock['failed']   = 0;
 			$lock['updated']  = time();
 			$this->set_lock( $lock );
-			$this->p->logger->info( 'bulk', sprintf(
-				/* translators: %d: failed images */
-				__( '%d images failed — retrying them automatically once.', 'optipress' ), $failed
-			) );
+			$this->p->logger->info( 'bulk', sprintf( __( '%d images failed — retrying once.', 'optipress' ), $failed ) );
 			return;
 		}
 
 		$counters = $this->p->stats->counters();
-
 		$this->set_lock( array(
 			'state'     => 'idle',
 			'mode'      => $mode,
@@ -194,23 +156,18 @@ class OptiPress_Queue {
 			'attempts'  => $lock['attempts'],
 			'last_file' => $lock['last_file'],
 		) );
-
 		$this->p->logger->success( 'bulk', sprintf(
-			/* translators: 1: mode, 2: processed, 3: failed */
 			__( 'Bulk %1$s completed: %2$d processed, %3$d failed.', 'optipress' ),
 			$this->mode_label( $mode ), (int) $lock['processed'], (int) $lock['failed']
 		), array( 'context' => array( 'processed' => (int) $lock['processed'], 'failed' => (int) $lock['failed'] ) ) );
-
 		set_transient( 'optipress_bulk_done', array(
 			'optimized' => (int) $lock['processed'] - (int) $lock['failed'],
 			'failed'    => (int) $lock['failed'],
 			'saved'     => (int) $counters['saved'],
 		), 300 );
-
 		$this->p->purge->maybe_purge( true );
 	}
 
-	/** Cancel a run. @param string $token */
 	public function cancel( $token ) {
 		$lock = $this->lock();
 		if ( $lock && $lock['token'] === $token ) {
@@ -218,14 +175,13 @@ class OptiPress_Queue {
 			$lock['token'] = '';
 			$this->set_lock( $lock );
 			$this->p->db->recover_stale_processing();
-			$this->p->logger->info( 'bulk', __( 'Bulk operation cancelled by user.', 'optipress' ) );
+			$this->p->logger->info( 'bulk', __( 'Bulk operation cancelled.', 'optipress' ) );
 			$this->p->stats->flush();
 			return true;
 		}
 		return false;
 	}
 
-	/** @return array|null */
 	public function lock() {
 		$lock = get_option( self::LOCK_OPTION );
 		return is_array( $lock ) ? $lock : null;
@@ -235,7 +191,6 @@ class OptiPress_Queue {
 		update_option( self::LOCK_OPTION, $lock, false );
 	}
 
-	/** Items stuck in 'processing' after a crashed request go back to pending. */
 	public function recover_stale_items() {
 		$this->p->db->recover_stale_processing();
 		$lock = $this->lock();

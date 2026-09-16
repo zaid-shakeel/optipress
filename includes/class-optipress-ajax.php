@@ -1,12 +1,8 @@
 <?php
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-/**
- * All AJAX endpoints. Every route: nonce + manage_options capability.
- */
 class OptiPress_Ajax {
-
-	/** @var OptiPress_Plugin */ private $p;
+	private $p;
 
 	public function __construct( $plugin ) {
 		$this->p = $plugin;
@@ -23,14 +19,13 @@ class OptiPress_Ajax {
 	private function guard() {
 		check_ajax_referer( 'optipress', 'nonce' );
 		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( array( 'message' => __( 'You do not have permission to do this.', 'optipress' ) ), 403 );
+			wp_send_json_error( array( 'message' => __( 'You do not have permission.', 'optipress' ) ), 403 );
 		}
 	}
 
-	/* ---------- Dashboard / stats ---------- */
-
 	public function h_stats() {
 		$this->guard();
+		OptiPress_Debug::log( 'ajax.stats', 'Stats requested' );
 		wp_send_json_success( array(
 			'counters' => $this->p->stats->counters(),
 			'activity' => $this->activity_rows( 8 ),
@@ -55,16 +50,15 @@ class OptiPress_Ajax {
 		return $rows;
 	}
 
-	/* ---------- Scan / sync ---------- */
-
 	public function h_scan() {
 		$this->guard();
+		OptiPress_Debug::log( 'ajax.scan.start', 'Scan requested' );
 		$r = $this->p->media->sync_missing( 300 );
+		$this->p->media->normalize_conversion_statuses();
 		$this->p->stats->flush();
+		OptiPress_Debug::log( 'ajax.scan.done', 'Scan complete', array( 'synced' => $r['synced'], 'remaining' => $r['remaining'] ) );
 		wp_send_json_success( $r );
 	}
-
-	/* ---------- Bulk ---------- */
 
 	public function h_bulk_start() {
 		$this->guard();
@@ -72,6 +66,7 @@ class OptiPress_Ajax {
 		if ( ! in_array( $mode, array( 'optimize', 'retry_failed', 'webp', 'avif' ), true ) ) {
 			$mode = 'optimize';
 		}
+		OptiPress_Debug::log( 'ajax.bulk_start', "Starting bulk mode: $mode" );
 		$r = $this->p->queue->start( $mode );
 		if ( empty( $r['ok'] ) ) {
 			wp_send_json_error( $r );
@@ -112,8 +107,6 @@ class OptiPress_Ajax {
 		) );
 	}
 
-	/* ---------- Media manager ---------- */
-
 	public function h_media() {
 		$this->guard();
 		$args = array(
@@ -123,8 +116,9 @@ class OptiPress_Ajax {
 			'avif'     => isset( $_GET['avif'] ) ? sanitize_key( $_GET['avif'] ) : 'all',
 			'type'     => isset( $_GET['type'] ) ? sanitize_key( $_GET['type'] ) : 'all',
 			'page'     => isset( $_GET['page'] ) ? max( 1, (int) $_GET['page'] ) : 1,
-			'per_page' => 25,
+			'per_page' => isset( $_GET['per_page'] ) ? max( 10, min( 100, (int) $_GET['per_page'] ) ) : 25,
 		);
+		OptiPress_Debug::log( 'ajax.media', 'Media list requested', array( 'filters' => $args ) );
 		$res  = $this->p->db->page_items( $args );
 		$rows = array();
 		foreach ( $res['rows'] as $item ) {
@@ -180,9 +174,6 @@ class OptiPress_Ajax {
 		) );
 	}
 
-	/**
-	 * Single operations: optimize | reoptimize | webp | avif | restore | retry.
-	 */
 	public function h_action() {
 		$this->guard();
 		$op  = isset( $_POST['op'] ) ? sanitize_key( $_POST['op'] ) : '';
@@ -190,23 +181,36 @@ class OptiPress_Ajax {
 		if ( empty( $ids ) || ! in_array( $op, array( 'optimize', 'reoptimize', 'webp', 'avif', 'restore', 'retry' ), true ) ) {
 			wp_send_json_error( array( 'message' => __( 'Invalid request.', 'optipress' ) ) );
 		}
+		OptiPress_Debug::log( 'ajax.action', "Action $op on " . count( $ids ) . " item(s)" );
 
 		$results = array();
 		foreach ( array_slice( $ids, 0, 50 ) as $id ) {
 			switch ( $op ) {
 				case 'webp':
 					$r = $this->p->converter->generate( $id, 'webp' );
-					$results[] = array( 'id' => $id, 'ok' => ! empty( $r['ok'] ), 'message' => $r['message'] );
+					$results[] = array(
+						'id' => $id,
+						'ok' => ! empty( $r['ok'] ),
+						'skipped' => ! empty( $r['skipped'] ),
+						'status' => ! empty( $r['skipped'] ) ? 'skipped' : ( ! empty( $r['ok'] ) ? 'done' : 'failed' ),
+						'message' => $r['message'],
+					);
 					break;
 				case 'avif':
 					$r = $this->p->converter->generate( $id, 'avif' );
-					$results[] = array( 'id' => $id, 'ok' => ! empty( $r['ok'] ), 'message' => $r['message'] );
+					$results[] = array(
+						'id' => $id,
+						'ok' => ! empty( $r['ok'] ),
+						'skipped' => ! empty( $r['skipped'] ),
+						'status' => ! empty( $r['skipped'] ) ? 'skipped' : ( ! empty( $r['ok'] ) ? 'done' : 'failed' ),
+						'message' => $r['message'],
+					);
 					break;
 				case 'restore':
 					$r = $this->p->backup->restore( $id );
-					$results[] = array( 'id' => $id, 'ok' => ! empty( $r['ok'] ), 'message' => $r['message'] );
+					$results[] = array( 'id' => $id, 'ok' => ! empty( $r['ok'] ), 'message' => $r['message'], 'status' => 'restored' );
 					break;
-				default: // optimize | reoptimize | retry
+				default:
 					if ( 'retry' === $op ) {
 						$this->p->db->update_item( $id, array( 'status' => 'pending', 'error_code' => '', 'error_message' => null ) );
 					}
@@ -218,18 +222,14 @@ class OptiPress_Ajax {
 						'status'  => isset( $r['status'] ) ? $r['status'] : 'failed',
 					);
 			}
-			// Fresh row for UI sync.
 			$item = $this->p->db->get_item( $id );
 			if ( $item ) {
 				$results[ count( $results ) - 1 ]['row'] = $this->item_to_row( $item );
 			}
 		}
-
 		$this->p->stats->flush();
 		wp_send_json_success( array( 'results' => $results ) );
 	}
-
-	/* ---------- Logs ---------- */
 
 	public function h_logs() {
 		$this->guard();
@@ -267,8 +267,6 @@ class OptiPress_Ajax {
 		wp_send_json_success( array( 'message' => __( 'All logs cleared.', 'optipress' ) ) );
 	}
 
-	/* ---------- Analytics ---------- */
-
 	public function h_analytics() {
 		$this->guard();
 		$range = isset( $_GET['range'] ) ? sanitize_key( $_GET['range'] ) : '30';
@@ -277,8 +275,6 @@ class OptiPress_Ajax {
 		}
 		wp_send_json_success( $this->p->stats->analytics( $range ) );
 	}
-
-	/* ---------- Settings / misc ---------- */
 
 	public function h_settings_save() {
 		$this->guard();
@@ -299,7 +295,7 @@ class OptiPress_Ajax {
 			'purged'  => $purged,
 			'message' => $purged
 				? sprintf( __( 'Caches purged: %s.', 'optipress' ), implode( ', ', $purged ) )
-				: __( 'No supported cache plugin responded. If you use a CDN, purge it from its own dashboard. Browsers may also keep their own cache.', 'optipress' ),
+				: __( 'No supported cache plugin responded.', 'optipress' ),
 		) );
 	}
 

@@ -91,6 +91,7 @@
 .op-pill--skipped{background:var(--op-warn-soft);color:var(--op-warn)}
 .op-pill--done{background:var(--op-success-soft);color:var(--op-success)}
 .op-pill--none{background:transparent;color:#b3bac9;border:1px dashed var(--op-border)}
+.op-pill--na{background:#eef1f7;color:#68738a;border:1px solid var(--op-border)}
 
 /* Alerts & toasts */
 .op-alert{border-radius:10px;padding:13px 16px;font-size:13.5px;margin-bottom:16px;border:1px solid}

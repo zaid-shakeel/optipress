@@ -1,36 +1,50 @@
 <?php
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-/**
- * WebP / AVIF generation with detailed failure diagnostics, engine fallback,
- * and memory headroom for large files. Produces sibling files.
- */
 class OptiPress_Converter {
-
-	/** @var OptiPress_Plugin */
 	private $p;
 
 	public function __construct( $plugin ) {
 		$this->p = $plugin;
 	}
 
-	/**
-	 * @param int    $item_id
-	 * @param string $format webp|avif
-	 * @return array {ok,message,files?,bytes?}
-	 */
 	public function generate( $item_id, $format ) {
 		$format = 'avif' === $format ? 'avif' : 'webp';
-		$item   = $this->p->db->get_item( (int) $item_id );
+		OptiPress_Debug::log( 'converter.start', "Generating $format for item $item_id" );
+
+		$item = $this->p->db->get_item( (int) $item_id );
 		if ( ! $item ) {
 			return array( 'ok' => false, 'message' => __( 'Image record not found.', 'optipress' ) );
+		}
+
+		// Hard-gate unsupported formats (SVG etc.) — set to 'na', never 'failed'.
+		if ( ! in_array( $item->mime, OptiPress_Media::supported_mimes(), true ) ) {
+			OptiPress_Debug::log( 'converter.na_unsupported', "Skipping $format for {$item->mime} (unsupported)" );
+			$this->p->db->update_item( (int) $item->id, array( $format . '_status' => 'na' ) );
+			return array(
+				'ok'      => false,
+				'skipped' => true,
+				'message' => sprintf( __( 'Not supported: %s files cannot be converted to %s.', 'optipress' ), $item->mime, strtoupper( $format ) ),
+			);
+		}
+
+		// Already-WebP files: mark WebP as 'na', not 'done'.
+		if ( 'webp' === $format && 'image/webp' === $item->mime ) {
+			OptiPress_Debug::log( 'converter.na_already_webp', "Skipping WebP conversion for already-WebP item $item_id" );
+			$this->p->db->update_item( (int) $item->id, array( 'webp_status' => 'na' ) );
+			return array(
+				'ok'      => false,
+				'skipped' => true,
+				'message' => __( 'Already WebP — no conversion needed.', 'optipress' ),
+			);
 		}
 
 		$caps = $this->p->env->capabilities();
 		if ( empty( $caps[ $format . '_encode' ] ) ) {
 			$msg = 'avif' === $format
-				? __( 'AVIF generation is unavailable because the current server does not provide the required image-processing capability.', 'optipress' )
+				? __( 'AVIF generation is unavailable on this server.', 'optipress' )
 				: __( 'WebP generation is unavailable on this server.', 'optipress' );
+			OptiPress_Debug::log( 'converter.unavailable', $msg );
 			$this->p->db->update_item( (int) $item->id, array( $format . '_status' => 'failed' ) );
 			$this->p->logger->error( $format, $msg, array( 'attachment_id' => (int) $item->attachment_id, 'file' => $item->file ) );
 			return array( 'ok' => false, 'message' => $msg );
@@ -66,6 +80,10 @@ class OptiPress_Converter {
 		$reasons = array();
 
 		foreach ( $files as $src ) {
+			// Never encode a file onto itself (e.g. .webp source in a WebP run).
+			if ( preg_match( '/\.' . $format . '$/i', $src ) ) {
+				continue;
+			}
 			$dest = preg_replace( '/\.(jpe?g|png|gif|webp)$/i', '', $src ) . '.' . $format;
 			$r    = $this->encode( $src, $dest, $format, $quality, $caps );
 			if ( $r['ok'] ) {
@@ -87,7 +105,6 @@ class OptiPress_Converter {
 			$reason_text = $reasons ? implode( ' | ', $reasons ) : __( 'unknown encoder error', 'optipress' );
 			$this->p->db->update_item( (int) $item->id, array( $status_col => 'failed' ) );
 			$this->p->logger->error( $format, sprintf(
-				/* translators: 1: format, 2: reasons */
 				__( '%1$s conversion failed for all sizes. Reasons: %2$s', 'optipress' ),
 				$fmt_label, $reason_text
 			), array(
@@ -101,21 +118,30 @@ class OptiPress_Converter {
 			);
 		}
 
-		$this->p->db->update_item( (int) $item->id, array( $status_col => 'done', $bytes_col => $bytes ) );
-		$this->p->db->bump_daily( $format, $done );
+		// Record per-item day/files for exact rollback on restore.
+		$meta_arr = json_decode( (string) $item->meta, true );
+		$meta_arr = is_array( $meta_arr ) ? $meta_arr : array();
+		$meta_arr[ $format . '_day' ]   = current_time( 'Y-m-d' );
+		$meta_arr[ $format . '_files' ] = $done;
+
+		$this->p->db->update_item( (int) $item->id, array(
+			$status_col => 'done',
+			$bytes_col  => $bytes,
+			'meta'      => wp_json_encode( $meta_arr ),
+		) );
+		$this->p->db->bump_daily( $format, 1 ); // per image, reversible on restore
 
 		$message = sprintf(
-			/* translators: 1: format, 2: file count, 3: total size */
 			__( '%1$s generated for %2$d files (%3$s).', 'optipress' ),
 			$fmt_label, $done, size_format( $bytes )
 		);
 		if ( $failed > 0 ) {
 			$message .= ' ' . sprintf(
-				/* translators: 1: count, 2: reasons */
 				__( '%1$d files failed: %2$s', 'optipress' ),
 				$failed, implode( ' | ', $reasons )
 			);
 		}
+		OptiPress_Debug::log( 'converter.done', $message );
 
 		$this->p->logger->success( $format, $message, array(
 			'attachment_id' => (int) $item->attachment_id,
@@ -127,14 +153,6 @@ class OptiPress_Converter {
 		return array( 'ok' => true, 'message' => $message, 'files' => $done, 'bytes' => $bytes );
 	}
 
-	/**
-	 * Standalone encoder test used by the Doctor. Encodes any source file.
-	 *
-	 * @param string $src
-	 * @param string $format webp|avif
-	 * @param bool   $keep   Keep the generated file (for further testing).
-	 * @return array {ok,reason,bytes?}
-	 */
 	public function test_encode( $src, $format, $keep = false ) {
 		$format = 'avif' === $format ? 'avif' : 'webp';
 		$caps   = $this->p->env->capabilities();
@@ -152,29 +170,21 @@ class OptiPress_Converter {
 		return $r;
 	}
 
-	/**
-	 * Encode one file. Tries the preferred engine, then falls back to the other.
-	 *
-	 * @return array {ok:bool, reason:string}
-	 */
 	private function encode( $src, $dest, $format, $quality, $caps ) {
 		if ( ! file_exists( $src ) || ! is_readable( $src ) ) {
 			return array( 'ok' => false, 'reason' => __( 'source file is missing or unreadable', 'optipress' ) );
 		}
 		if ( ! is_writable( dirname( $dest ) ) ) {
-			return array( 'ok' => false, 'reason' => __( 'the destination folder is not writable', 'optipress' ) );
+			return array( 'ok' => false, 'reason' => __( 'destination folder is not writable', 'optipress' ) );
 		}
-
 		$this->raise_memory_for( $src );
 
 		$imagick_can = ! empty( $caps['imagick'] ) && ! empty( $caps[ $format . '_imagick' ] );
 		$gd_can      = ! empty( $caps['gd'] ) && ! empty( $caps[ $format . '_gd' ] );
-
 		$order = ( 'imagick' === $caps['engine'] ) ? array( 'imagick', 'gd' ) : array( 'gd', 'imagick' );
 		$order = array_values( array_filter( $order, function ( $engine ) use ( $imagick_can, $gd_can ) {
 			return ( 'imagick' === $engine && $imagick_can ) || ( 'gd' === $engine && $gd_can );
 		} ) );
-
 		if ( empty( $order ) ) {
 			return array( 'ok' => false, 'reason' => __( 'no encoder is actually available for this format on this server', 'optipress' ) );
 		}
@@ -182,7 +192,7 @@ class OptiPress_Converter {
 		$expected_mime = ( 'webp' === $format ) ? 'image/webp' : 'image/avif';
 		$last_reason   = '';
 
-				foreach ( $order as $engine ) {
+		foreach ( $order as $engine ) {
 			$tmp = $dest . '.tmp-' . wp_rand( 1000, 9999 );
 			try {
 				$written = ( 'imagick' === $engine )
@@ -211,7 +221,7 @@ class OptiPress_Converter {
 					@unlink( $tmp );
 				}
 				$last_reason = $this->human_reason( $e, $src );
-				// Log the full exception for debugging.
+				OptiPress_Debug::log( 'converter.encode_error', $last_reason, array( 'file' => wp_basename( $src ), 'engine' => $engine ) );
 				error_log( sprintf(
 					'OptiPress %s conversion failed for %s (engine: %s): %s in %s:%d',
 					$format, wp_basename( $src ), $engine,
@@ -219,18 +229,14 @@ class OptiPress_Converter {
 				) );
 			}
 		}
-
 		return array(
 			'ok'     => false,
 			'reason' => $last_reason ? $last_reason : __( 'unknown encoder error', 'optipress' ),
 		);
 	}
 
-	/** @return bool */
 	private function encode_imagick( $src, $tmp, $format, $quality ) {
-		if ( ! class_exists( 'Imagick' ) ) {
-			return false;
-		}
+		if ( ! class_exists( 'Imagick' ) ) { return false; }
 		$im = new \Imagick();
 		try {
 			$im->readImage( $src );
@@ -244,22 +250,18 @@ class OptiPress_Converter {
 			$im->clear();
 			return (bool) $ok;
 		} catch ( \Throwable $e ) {
-			try { $im->clear(); } catch ( \Throwable $e2 ) { /* ignore */ }
+			try { $im->clear(); } catch ( \Throwable $e2 ) {}
 			throw $e;
 		}
 	}
 
-	/** @return bool */
 	private function encode_gd( $src, $tmp, $format, $quality ) {
 		$info = @getimagesize( $src );
-		if ( ! $info || empty( $info['mime'] ) ) {
-			return false;
-		}
+		if ( ! $info || empty( $info['mime'] ) ) { return false; }
 		$img = null;
 		switch ( $info['mime'] ) {
 			case 'image/jpeg':
-				$img = @imagecreatefromjpeg( $src );
-				break;
+				$img = @imagecreatefromjpeg( $src ); break;
 			case 'image/png':
 				$img = @imagecreatefrompng( $src );
 				if ( $img ) {
@@ -269,15 +271,11 @@ class OptiPress_Converter {
 				}
 				break;
 			case 'image/gif':
-				$img = @imagecreatefromgif( $src );
-				break;
+				$img = @imagecreatefromgif( $src ); break;
 			case 'image/webp':
-				$img = function_exists( 'imagecreatefromwebp' ) ? @imagecreatefromwebp( $src ) : null;
-				break;
+				$img = function_exists( 'imagecreatefromwebp' ) ? @imagecreatefromwebp( $src ) : null; break;
 		}
-		if ( ! $img ) {
-			return false;
-		}
+		if ( ! $img ) { return false; }
 		$ok = false;
 		if ( 'webp' === $format && function_exists( 'imagewebp' ) ) {
 			$ok = imagewebp( $img, $tmp, (int) $quality );
@@ -288,12 +286,10 @@ class OptiPress_Converter {
 		return (bool) $ok;
 	}
 
-	/** Give large decodes more memory before attempting. @param string $src */
 	private function raise_memory_for( $src ) {
 		$size   = (int) @filesize( $src );
 		$info   = @getimagesize( $src );
 		$pixels = ( $info && ! empty( $info[0] ) && ! empty( $info[1] ) ) ? (int) $info[0] * (int) $info[1] : 0;
-
 		if ( $size > 2 * MB_IN_BYTES || $pixels > 4000000 ) {
 			wp_raise_memory_limit( 'admin' );
 			if ( $pixels > 16000000 ) {
@@ -306,19 +302,17 @@ class OptiPress_Converter {
 		}
 	}
 
-	/** @return string */
 	private function human_reason( $e, $src ) {
 		$m    = strtolower( $e->getMessage() );
 		$base = wp_basename( $src );
-
 		if ( false !== strpos( $m, 'memory' ) || false !== strpos( $m, 'allocated' ) ) {
-			return sprintf( __( 'the server ran out of memory decoding %s — the file is very large; raise PHP memory_limit or lower quality', 'optipress' ), $base );
+			return sprintf( __( 'server ran out of memory decoding %s', 'optipress' ), $base );
 		}
 		if ( false !== strpos( $m, 'delegate' ) ) {
-			return __( 'the image engine is missing the required encoder delegate (Imagick was compiled without it)', 'optipress' );
+			return __( 'image engine is missing the required encoder delegate', 'optipress' );
 		}
 		if ( false !== strpos( $m, 'cache' ) && ( false !== strpos( $m, 'resource' ) || false !== strpos( $m, 'policy' ) ) ) {
-			return __( 'Imagick resource limits were reached (server policy.xml restricts image size/memory)', 'optipress' );
+			return __( 'Imagick resource limits were reached', 'optipress' );
 		}
 		if ( false !== strpos( $m, 'permission' ) || false !== strpos( $m, 'denied' ) ) {
 			return __( 'file permission problem', 'optipress' );
@@ -329,16 +323,12 @@ class OptiPress_Converter {
 		return $e->getMessage();
 	}
 
-	/** Delete all conversion siblings for an item. @param object $item */
 	public function delete_conversions_for_item( $item ) {
 		$uploads = OptiPress_Plugin::uploads();
 		$abs     = trailingslashit( $uploads['basedir'] ) . $item->file;
-		if ( ! $abs || ! file_exists( $abs ) ) {
-			return;
-		}
+		if ( ! $abs || ! file_exists( $abs ) ) { return; }
 		$meta = wp_get_attachment_metadata( (int) $item->attachment_id );
 		$meta = is_array( $meta ) ? $meta : array();
-
 		$files = array( $abs );
 		if ( ! empty( $meta['sizes'] ) ) {
 			$dir = dirname( $abs );

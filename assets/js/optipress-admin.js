@@ -25,11 +25,15 @@
 		if ((method || 'POST') === 'GET') { url += '?' + params.toString(); }
 		else { opts.headers = { 'Content-Type': 'application/x-www-form-urlencoded' }; opts.body = params.toString(); }
 		return fetch(url, opts).then(function (r) {
-			if (!r.ok) { throw new Error('HTTP ' + r.status); }
-			return r.json();
-		}).then(function (json) {
-			if (!json.success) { throw new Error((json.data && json.data.message) || 'Request failed'); }
-			return json.data;
+			return r.text().then(function (text) {
+				var json = null;
+				try { json = JSON.parse(text); } catch (e) { json = null; }
+				if (!r.ok) { throw new Error('HTTP ' + r.status + ' → ' + text.slice(0, 180)); }
+				if (!json || json.success !== true) {
+					throw new Error('Server said: ' + (text.slice(0, 180) || '(empty response)'));
+				}
+				return json.data;
+			});
 		});
 	}
 
@@ -208,7 +212,7 @@
 	/* ---------------- Pill helper ---------------- */
 
 	function pill(status, label) {
-		var map = { optimized: 'Optimized', pending: 'Pending', failed: 'Failed', skipped: 'Skipped', processing: 'Processing', done: 'Done', none: '—' };
+		var map = { optimized: 'Optimized', pending: 'Pending', failed: 'Failed', skipped: 'Skipped', processing: 'Processing', done: 'Done', none: '—', na: 'N/A' };
 		return '<span class="op-pill op-pill--' + esc(status) + '">' + esc(label || map[status] || status) + '</span>';
 	}
 
@@ -238,8 +242,24 @@
 					self.scanThenStart(btn.dataset.bulkMode);
 				});
 			});
+			
 			var scanBtn = document.querySelector('[data-bulk-scan]');
-			if (scanBtn) scanBtn.addEventListener('click', function () { self.scan(function () { toast('Library scan complete.', 'success'); }); });
+			if (scanBtn) scanBtn.addEventListener('click', function () {
+				scanBtn.disabled = true;
+				self.scan(function (ok) {
+					scanBtn.disabled = false;
+					if (!ok) return;
+					self.refreshButtons().then(function () {
+						toast('Library scan complete — counts updated.', 'success');
+					});
+				});
+			});
+			self.modeLabels = {};
+			document.querySelectorAll('[data-bulk-mode]').forEach(function (b) {
+				self.modeLabels[b.dataset.bulkMode] = b.innerHTML;
+			});
+
+
 			this.el.cancel.addEventListener('click', function () { self.cancel(); });
 
 			api('bulk_status', {}, 'GET').then(function (r) {
@@ -256,8 +276,8 @@
 			var self = this;
 			function step() {
 				api('scan').then(function (r) {
-					if (r.remaining > 0) { setTimeout(step, 60); } else { done(); }
-				}).catch(function (e) { toast(e.message, 'error'); });
+					if (r.remaining > 0) { setTimeout(step, 60); } else { done(true); }
+				}).catch(function (e) { toast(e.message, 'error'); done(false); });
 			}
 			step();
 		},
@@ -266,7 +286,7 @@
 			var self = this;
 			var btn = document.querySelector('[data-bulk-mode="' + mode + '"]');
 			if (btn) { btn.disabled = true; btn.innerHTML = '<span class="op-spinner"></span> ' + esc(I.scan_found || 'Scanning…'); }
-			this.scan(function () { self.start(mode); });
+			this.scan(function (ok) { if (ok) self.start(mode); });
 		},
 
 		start: function (mode) {
@@ -276,6 +296,12 @@
 				self.total = r.total;
 				self.cancelled = false;
 				self.errors = 0;
+
+				if (r.breakdown && (r.breakdown.already || r.breakdown.unsupported || r.breakdown.na)) {
+					toast('Queued ' + fmtNum(r.total) + ' for conversion · already converted: ' + fmtNum(r.breakdown.already) +
+						' · not supported: ' + fmtNum(r.breakdown.unsupported + r.breakdown.na), 'info');
+				}
+
 				if (r.total === 0) {
 					toast('Nothing to process — the queue is empty.', 'info');
 					self.refreshButtons();
@@ -399,11 +425,40 @@
 		},
 
 		refreshButtons: function () {
-			api('bulk_status', {}, 'GET').then(function (r) {
+			return api('bulk_status', {}, 'GET').then(function (r) {
+				var c = r.counters, rem = r.remaining;
+				var set = function (key, val, sub) {
+					var el = document.querySelector('[data-bstat="' + key + '"]');
+					if (!el) return;
+					el.textContent = val;
+					var nx = el.nextElementSibling;
+					if (sub != null && nx && nx.classList && nx.classList.contains('op-stat__sub')) nx.textContent = sub;
+				};
+				set('total', fmtNum(c.total), null);
+				set('optimized', fmtNum(c.optimized), c.library_pct.toFixed(1) + '% of library processed');
+				set('attention', fmtNum(c.pending + c.failed), fmtNum(c.pending) + ' pending · ' + fmtNum(c.failed) + ' failed');
+				set('saved', fmtBytes(c.saved), 'avg ' + c.avg_pct.toFixed(1) + '% per image');
+
+				var qset = function (id, v, danger) {
+					var e = document.getElementById(id);
+					if (!e) return;
+					e.textContent = fmtNum(v);
+					if (danger) e.className = v > 0 ? 'op-danger' : '';
+				};
+				qset('op-q-optimize', rem.optimize);
+				qset('op-q-retry', rem.retry_failed, true);
+				qset('op-q-webp', rem.webp);
+				qset('op-q-avif', rem.avif);
+
+				var head = document.getElementById('op-bulk-headnote');
+				if (head) head.textContent = fmtNum(c.total) + ' images total';
+				var caught = document.getElementById('op-bulk-caughtup');
+				if (caught) caught.hidden = (rem.optimize + rem.retry_failed) > 0;
+
 				document.querySelectorAll('[data-bulk-mode]').forEach(function (b) {
 					var mode = b.dataset.bulkMode;
-					var count = r.remaining[mode] || 0;
-					b.disabled = count < 1;
+					b.disabled = (rem[mode] || 0) < 1;
+					if (!b.disabled && Bulk.modeLabels && Bulk.modeLabels[mode]) b.innerHTML = Bulk.modeLabels[mode];
 				});
 			}).catch(function () {});
 		}
@@ -414,7 +469,7 @@
 		/* ---------------- Media table ---------------- */
 
 	var Media = {
-		page: 1, filters: { q: '', status: 'all', webp: 'all', type: 'all' }, selected: {},
+		page: 1, filters: { q: '', status: 'all', webp: 'all', type: 'all', per_page: '25' }, selected: {},
 
 		init: function () {
 			if (!document.getElementById('op-media-table')) return;
@@ -427,6 +482,12 @@
 					self.filters[k] = e.target.value; self.page = 1; self.load();
 				});
 			});
+
+			var pp = document.getElementById('op-media-perpage');
+			if (pp) pp.addEventListener('change', function (e) {
+				self.filters.per_page = e.target.value; self.page = 1; self.load();
+			});
+
 			this.load();
 		},
 
@@ -553,14 +614,19 @@
 		var labels = { optimize: I.optimizing, reoptimize: I.optimizing, webp: I.generating, avif: I.generating, restore: I.restoring, retry: I.optimizing };
 		if (btn) { btn.disabled = true; btn.innerHTML = '<span class="op-spinner"></span> ' + esc(labels[op] || 'Working…'); }
 		api('action', { op: op, ids: ids }).then(function (r) {
-			var okCount = 0, failCount = 0, msg = '';
+			var okCount = 0, failCount = 0, skipCount = 0, msg = '';
 			(r.results || []).forEach(function (res) {
-				if (res.ok) okCount++; else failCount++;
+				if (res.status === 'skipped' || res.skipped) skipCount++;
+				else if (res.ok) okCount++;
+				else failCount++;
 				msg = res.message || msg;
 			});
-			if (failCount === 0) toast(okCount + (op === 'restore' ? ' image(s) restored.' : ' operation(s) succeeded. ') + (msg || ''), 'success');
-			else toast(msg || (failCount + ' operation(s) failed.'), 'error');
-			if (window.Media) Media.load();
+			var parts = [];
+			if (okCount) parts.push(okCount + (op === 'restore' ? ' restored' : ' succeeded'));
+			if (skipCount) parts.push(skipCount + ' skipped (unsupported/already done)');
+			if (failCount) parts.push(failCount + ' failed');
+			if (failCount === 0) toast(parts.join(' · ') + (msg ? ' — ' + msg : ''), 'success');
+			else toast(msg || (parts.join(' · ') || 'Operation failed.'), 'error');
 		}).catch(function (e) {
 			toast(e.message, 'error');
 			if (btn) { btn.disabled = false; btn.innerHTML = original; }
@@ -594,8 +660,8 @@
 				(r.status === 'pending' ? '<button class="op-btn op-btn--primary" data-run="optimize" data-id="' + r.id + '">Optimize</button>' : '') +
 				(r.status === 'optimized' ? '<button class="op-btn op-btn--primary" data-run="reoptimize" data-id="' + r.id + '">Re-optimize</button>' : '') +
 				(r.status === 'failed' ? '<button class="op-btn op-btn--primary" data-run="retry" data-id="' + r.id + '">Retry</button>' : '') +
-				(r.status === 'optimized' && d.caps.webp_encode ? '<button class="op-btn op-btn--ghost" data-run="webp" data-id="' + r.id + '">' + (r.webp === 'done' ? 'Regenerate' : 'Generate') + ' WebP</button>' : '') +
-				(r.status === 'optimized' && d.caps.avif_encode ? '<button class="op-btn op-btn--ghost" data-run="avif" data-id="' + r.id + '">' + (r.avif === 'done' ? 'Regenerate' : 'Generate') + ' AVIF</button>' : '') +
+				(r.status === 'optimized' && d.caps.webp_encode && r.webp !== 'na' ? '<button class="op-btn op-btn--ghost" data-run="webp" data-id="' + r.id + '">' + (r.webp === 'done' ? 'Regenerate' : 'Generate') + ' WebP</button>' : '') +
+				(r.status === 'optimized' && d.caps.avif_encode && r.avif !== 'na' ? '<button class="op-btn op-btn--ghost" data-run="avif" data-id="' + r.id + '">' + (r.avif === 'done' ? 'Regenerate' : 'Generate') + ' AVIF</button>' : '') +
 				(r.backup ? '<button class="op-btn op-btn--ghost" data-run="restore" data-id="' + r.id + '">Restore Original</button>' : '') +
 				'</div></div></div>';
 

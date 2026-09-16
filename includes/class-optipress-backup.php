@@ -1,31 +1,18 @@
 <?php
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-/**
- * Original-file backups + restoration. Backups live outside year/month folders
- * for clarity: uploads/optipress-backups/{attachment_id}/...
- */
 class OptiPress_Backup {
-
-	/** @var OptiPress_Plugin */ private $plugin;
+	private $plugin;
 
 	public function __construct( $plugin ) {
 		$this->plugin = $plugin;
 	}
 
-	/** @return string */
 	public function base_dir() {
 		$uploads = OptiPress_Plugin::uploads();
 		return trailingslashit( $uploads['basedir'] ) . 'optipress-backups';
 	}
 
-	/**
-	 * Back up the full file + existing sizes before first destructive write.
-	 *
-	 * @param object $item
-	 * @param array  $files Absolute paths.
-	 * @return array|false Map absolute => backup path, or false on failure.
-	 */
 	public function backup_files( $item, $files ) {
 		$base = $this->base_dir() . '/' . (int) $item->attachment_id;
 		if ( ! file_exists( $base ) && ! wp_mkdir_p( $base ) ) {
@@ -33,9 +20,7 @@ class OptiPress_Backup {
 		}
 		$map = array();
 		foreach ( $files as $abs ) {
-			if ( ! file_exists( $abs ) ) {
-				continue;
-			}
+			if ( ! file_exists( $abs ) ) { continue; }
 			$dest = $base . '/' . wp_basename( $abs );
 			if ( ! file_exists( $dest ) ) {
 				if ( ! @copy( $abs, $dest ) ) {
@@ -47,20 +32,25 @@ class OptiPress_Backup {
 		return $map;
 	}
 
-	/**
-	 * Restore an item from backup. Removes conversions, resets stats.
-	 *
-	 * @param int $item_id
-	 * @return array {ok:bool,message:string}
-	 */
 	public function restore( $item_id ) {
+		OptiPress_Debug::log( 'restore.start', "Restoring item $item_id" );
+
 		$item = $this->plugin->db->get_item( (int) $item_id );
 		if ( ! $item ) {
 			return array( 'ok' => false, 'message' => __( 'Image record not found.', 'optipress' ) );
 		}
 		if ( ! (int) $item->has_backup ) {
-			return array( 'ok' => false, 'message' => __( 'No backup exists for this image. Backups are only created when “Backup original files” is enabled before optimization.', 'optipress' ) );
+			return array( 'ok' => false, 'message' => __( 'No backup exists for this image.', 'optipress' ) );
 		}
+
+		// Capture pre-restore state so analytics can be rolled back exactly.
+		$was_optimized = ( 'optimized' === $item->status );
+		$had_webp      = ( 'done' === $item->webp_status );
+		$had_avif      = ( 'done' === $item->avif_status );
+		$saved_bytes   = (int) $item->saved_bytes;
+		$opt_day       = $item->optimized_at ? substr( (string) $item->optimized_at, 0, 10 ) : '';
+		$meta_arr      = json_decode( (string) $item->meta, true );
+		$meta_arr      = is_array( $meta_arr ) ? $meta_arr : array();
 
 		$uploads = OptiPress_Plugin::uploads();
 		$abs     = trailingslashit( $uploads['basedir'] ) . $item->file;
@@ -86,14 +76,11 @@ class OptiPress_Backup {
 				$restored++;
 			}
 		}
-
 		if ( 0 === $restored ) {
 			return array( 'ok' => false, 'message' => __( 'Backup files could not be found on disk.', 'optipress' ) );
 		}
 
-		// Remove generated conversions — they no longer match the restored files.
 		$this->plugin->converter->delete_conversions_for_item( $item );
-
 		$new_bytes = $this->plugin->media->compute_bytes( $abs, $meta );
 
 		$this->plugin->db->update_item( (int) $item->id, array(
@@ -110,6 +97,28 @@ class OptiPress_Backup {
 			'optimized_at'  => null,
 		) );
 
+		// Roll back daily analytics so history reflects reality again.
+		OptiPress_Debug::log( 'restore.rollback', "Rolling back analytics: opt=$was_optimized webp=$had_webp avif=$had_avif saved=$saved_bytes", array(
+			'opt_day' => $opt_day, 'webp_day' => $meta_arr['webp_day'] ?? '', 'avif_day' => $meta_arr['avif_day'] ?? '',
+		) );
+
+		if ( $was_optimized && $opt_day ) {
+			$this->plugin->db->decrement_daily( $opt_day, 'optimized', 1 );
+			$this->plugin->db->decrement_daily( $opt_day, 'saved', $saved_bytes );
+		}
+		if ( $had_webp ) {
+			$d = ! empty( $meta_arr['webp_day'] ) ? $meta_arr['webp_day'] : $opt_day;
+			if ( $d ) {
+				$this->plugin->db->decrement_daily( $d, 'webp', 1 );
+			}
+		}
+		if ( $had_avif ) {
+			$d = ! empty( $meta_arr['avif_day'] ) ? $meta_arr['avif_day'] : $opt_day;
+			if ( $d ) {
+				$this->plugin->db->decrement_daily( $d, 'avif', 1 );
+			}
+		}
+
 		$this->plugin->stats->flush();
 		$this->plugin->logger->success( 'restore', __( 'Image restored from backup.', 'optipress' ), array(
 			'attachment_id' => (int) $item->attachment_id,
@@ -120,15 +129,10 @@ class OptiPress_Backup {
 
 		return array(
 			'ok'      => true,
-			'message' => sprintf(
-				/* translators: %d: number of files restored */
-				__( 'Restored %d files from backup. The image is now pending re-optimization.', 'optipress' ),
-				$restored
-			),
+			'message' => sprintf( __( 'Restored %d files from backup.', 'optipress' ), $restored ),
 		);
 	}
 
-	/** @param int $attachment_id */
 	public function delete_backups( $attachment_id ) {
 		$dir = $this->base_dir() . '/' . (int) $attachment_id;
 		if ( is_dir( $dir ) ) {
